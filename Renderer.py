@@ -1,19 +1,18 @@
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from numpy import ndarray
 
-# Constants
 cols, rows = 80, 25
 cell_width, cell_height = 9, 16
 width, height = cols * cell_width, rows * cell_height
 
-# Load font (You can adjust this path or use a bitmap font for better accuracy)
-try:
-    font = ImageFont.truetype("cga.ttf", 14)
-except IOError:
-    font = ImageFont.load_default()
+font = ImageFont.truetype("cga.ttf", 14)
 
 image = Image.new("RGB", (width, height))
 draw = ImageDraw.Draw(image)
+
+last_buffer: bytearray = None
+last_rendered: ndarray = None
 
 # VGA 16-color palette (RGB)
 VGA_PALETTE = [
@@ -36,6 +35,11 @@ VGA_PALETTE = [
 ]
 
 def render_text_buffer_to_rgb(buffer: bytearray) -> np.ndarray:
+    global last_buffer
+    global last_rendered
+    if last_buffer == buffer:
+        return last_rendered
+    last_buffer = buffer
     # Create the image
     for row in range(rows):
         for col in range(cols):
@@ -44,16 +48,20 @@ def render_text_buffer_to_rgb(buffer: bytearray) -> np.ndarray:
             attr = buffer[i + 1]
             fg_color = VGA_PALETTE[attr & 0x0F]
             bg_color = VGA_PALETTE[(attr >> 4) & 0x0F]
-            char = chr(char_code) if 32 <= char_code <= 126 else ' '
+            try:
+                char = bytes([char_code]).decode('windows-1252')
+            except:
+                char = " "
 
             x = col * cell_width
             y = row * cell_height
 
             # Draw background
-            draw.rectangle([x, y, x + cell_width, y + cell_height], fill=bg_color)
+            draw.rectangle((x, y, x + cell_width, y + cell_height), fill=bg_color)
 
             # Draw character
             draw.text((x, y), char, font=font, fill=fg_color)
 
     # Convert to NumPy array
-    return np.transpose(image, (1, 0, 2))
+    last_rendered = np.transpose(image, (1, 0, 2))
+    return last_rendered

@@ -5,8 +5,10 @@ class Screen:
     def __init__(self, resolution: tuple):
         self.resolution = pg.Vector2(resolution)
         self.screen = pg.display.set_mode(resolution)
-        self.keystrokes: list[Key] = []
         pg.display.set_caption('x86-test')
+        self.keystrokes: list[Key] = []
+        self.exiting = False
+
 
     def write(self, data):
         surface = pg.Surface(self.resolution)
@@ -23,3 +25,7 @@ class Screen:
                     pg.quit()
                     exit()
                 self.keystrokes.append(Key(event.scancode, event.key))
+
+    def exit(self):
+        self.exiting = True
+        pg.quit()

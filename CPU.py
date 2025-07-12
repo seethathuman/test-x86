@@ -8,15 +8,40 @@ class CPU:
         self.eax = self.ebx = self.ecx = self.edx = 0
         self.esi = self.edi = self.ebp = 0
         self.esp = 0x7C00  # Stack pointer initialized to before the boot sector
-        self.ip = 0
+        self.ip = 0xFFF0
 
         # Segment registers
         # Code, Data, Extra, Stack, F, G
-        self.cs = self.ds = 0x7c0
+        self.cs = self.ds = 0xF000
         self.es = self.ss = self.fs = self.gs = 0
 
+        #Bit	Name	Meaning
+        #0	    CF	    Carry Flag (unsigned overflow)
+        #1	    1	    Reserved (always 1 in EFLAGS)
+        #2	    PF	    Parity Flag (low byte has even parity)
+        #3	    0	    Reserved (always 0)
+        #4	    AF	    Auxiliary Carry (BCD operations)
+        #5	    0	    Reserved (always 0)
+        #6	    ZF	    Zero Flag (result is zero)
+        #7	    SF	    Sign Flag (result is negative)
+        #8	    TF	    Trap Flag (single-step debug mode)
+        #9	    IF	    Interrupt Enable Flag
+        #10	    DF	    Direction Flag (string ops direction)
+        #11	    OF	    Overflow Flag (signed overflow)
+        #12	    IOPL	I/O Privilege Level (bit 0)
+        #13	    IOPL	I/O Privilege Level (bit 1)
+        #14	    NT	    Nested Task Flag
+        #15	    0	    Reserved (always 0)
+        #16	    RF	    Resume Flag (used with debug exceptions)
+        #17	    VM	    Virtual-8086 Mode
+        #18	    AC	    Alignment Check
+        #19	    VIF	    Virtual Interrupt Flag (virtual IF)
+        #20	    VIP	    Virtual Interrupt Pending
+        #21	    ID	    ID Flag (can CPUID instruction be used?)
+        #22–31	0	    Reserved (always 0)
+
         # Flags and control registers
-        self.flags = 0
+        self.flags = 0b01000000000000000000000000000000
         self.cr0 = self.cr2 = self.cr3 = self.cr4 = self.cr8 = 0
         self.cr1 = self.cr5 = self.cr6 = self.cr7 = None
         self.xcr0 = 0
@@ -27,22 +52,36 @@ class CPU:
         # System state
         self.memory: AddressSpace = AddressSpace()
         self.screen = None
-        self.real_mode = real_mode
-        self.operand_override = False
+        self.debug_val = 0
+        self.debug_mode = debug_mode
 
+        # CPU state
+        self.real_mode = real_mode
         self.cursor_x = 0
         self.cursor_y = 0
 
-        self.debug_mode = debug_mode
+        # Overides
+        self.overide_count = 0
+        self.segment_override = None
+        self.operand_override = False
+
 
     def execute(self):
         # Fetch prefix bytes first
         prefix = self.fetch()[0]
-        if prefix == 0x66 and not self.operand_override:
-            self.operand_override = True
-            self.ip += 1
-            self.execute()
-            return
+        if self.overide_count < 4:
+            if prefix == 0x66:
+                self.operand_override = True
+                self.ip += 1
+                self.overide_count += 1
+                self.execute()
+                return
+            if prefix == 0x36:
+                self.segment_override = self.ss
+                self.ip += 1
+                self.overide_count += 1
+                self.execute()
+                return
 
         # Two-byte opcodes start with 0x0F
         if prefix == 0x0F:
@@ -51,15 +90,50 @@ class CPU:
             self.match_short()
 
         self.operand_override = False  # Reset after instruction
+        self.segment_override = None
+        self.overide_count = 0
 
     def match_short(self):
         opcode = self.fetch()[0]
 
         match opcode:
-            # NOP (90)
+            # HLT = F4
+            case 0xF4:
+                self.halt("HALT INSTRUCTION")
+                self.ip += 1
+
+            # NOP = 90
             case 0x90:
                 self.log("NOP")
                 self.ip += 1
+
+            # MOV r/m16/32, r16/32 = 89 /r
+            case 0x89:
+                modrm = modRM(self)
+                size = self.get_size()
+                value = self.get_reg(modrm.reg, size)
+                if modrm.mod == 0b11: # register to register
+                    self.set_reg(modrm.rm, value, size)
+                    self.log(f"MOV {self.reg_name(modrm.rm, size)}, {hex(value)}")
+                else:
+                    self.memory.write(modrm.addr, value)
+                    self.log(f"MOV {hex(modrm.addr)}, {hex(value)}")
+                self.ip += 1
+
+            # MOV r/m16/32, imm16/32 = C7 /0 imm
+            case 0xC7:
+                size = self.get_size()
+                modrm = modRM(self)
+                value = self.fetch(1, size)
+                if modrm.reg:
+                    self.halt("REG is non-0 while executing /0 instruction")
+                if modrm.mod == 0b11: # register direct
+                    self.set_reg(modrm.rm, value, size)
+                    self.log(f"MOV {self.reg_name(modrm.rm, size)} {hex(int.from_bytes(value, 'little'))}")
+                else: # direct memory addressing
+                    self.memory.write(modrm.addr, value)
+                    self.log(f"MOV {hex(modrm.addr)} {hex(int.from_bytes(value, 'little'))}")
+                self.ip += 1 + size
 
             # MOV r16/32, imm16/32 = B8+r
             case 0xB8 | 0xB9 | 0xBA | 0xBB | 0xBC | 0xBD | 0xBE | 0xBF:
@@ -75,7 +149,7 @@ class CPU:
                 reg = opcode - 0xB0  # get register id
                 imm = int.from_bytes(self.fetch(1, 1), 'little')
                 self.set_reg(reg, imm, 1)
-                self.log(f"MOV r8 {reg}, {hex(imm)}")
+                self.log(f"MOV r8 {self.reg_name(reg, 1)}, {hex(imm)}")
                 self.ip += 2
 
             # MOV Sreg, r/m16/32 = 8E /r
@@ -89,9 +163,9 @@ class CPU:
                 size = self.get_size()
                 if mod == 0b11:  # Register to register
                     self.set_sreg(reg, self.get_reg(rm, size))
-                    self.log(f"MOV SREG {reg}, {hex(self.get_reg(rm, size))}")
+                    self.log(f"MOV {self.sreg_name(reg)}, {hex(self.get_reg(rm, 2))}")
                 else:
-                   self.set_sreg(reg, self.memory.read(modrm.addr, size))
+                   self.set_sreg(reg, self.memory.read(modrm.addr, 2))
                 self.ip += 1
 
             # LES r16/32, m16:16/32 = C4 /r
@@ -118,7 +192,7 @@ class CPU:
                 size = self.get_size() # get size of operand
                 value = self.get_reg(reg, size) # get register value
                 self.esp -= size # decrease stack pointer
-                addr = self.resolve_address(self.ss, self.esp) # get address for stack pointer
+                addr = self.resolve_address(self.ss, self.esp, False) # get address for stack pointer
                 self.memory.write(addr, value.to_bytes(size, 'little')) # write bytes
                 self.log(f"PUSH {self.reg_name(reg, size)}")
                 self.ip += 1
@@ -127,7 +201,7 @@ class CPU:
             case 0x58 | 0x59 | 0x5A | 0x5B | 0x5C | 0x5D | 0x5E | 0x5F:
                 reg = opcode - 0x58 # get register id
                 size = self.get_size() # get size of operand
-                addr = self.resolve_address(self.ss, self.esp) # get address of stack
+                addr = self.resolve_address(self.ss, self.esp, False) # get address of stack
                 data = self.memory.read(addr, size) # read stack
                 value = int.from_bytes(data, 'little')
                 self.set_reg(reg, value, size) # set register value
@@ -144,7 +218,8 @@ class CPU:
                 self.ip += 1
                 self.log(f'LODSB => AL = {hex(byte)}, ESI = {hex(self.esi)}, resolved address = {hex(addr)}')
 
-            case 0x3C:  # CMP AL, imm8 = 3C ib
+            # CMP AL, imm8 = 3C ib
+            case 0x3C:
                 src = self.fetch(1, 1)[0]  # fetch immediate byte
                 dest = self.get_reg(0, 1)  # AL register
                 result = dest - src  # perform subtraction
@@ -155,7 +230,92 @@ class CPU:
                 self.ip += 2
                 self.log(f'CMP AL, {hex(src)}')
 
-            # JNZ/JNE rel8 = 75
+            # CMP AX, imm16 = 3D ib
+            case 0x3D:
+                src = int.from_bytes(self.fetch(1, 2), byteorder="little", signed=True) # fetch immediate byte
+                dest = self.get_reg(0, 2)  # AX register
+                result = dest - src  # perform subtraction
+                self.set_flag(0, src > dest)  # Set the carry flag (CF) if AL < imm8
+                self.set_flag(2, bin(result).count(
+                    '1') % 2 == 0)  # Set the parity flag (PF) if result has even ammount of ones
+                self.set_flag(6, result == 0)  # Set the zero flag (ZF) if result is zero
+                self.set_flag(7, (result & 0x80) != 0)  # Set the sign flag (SF) if result is negative
+                self.ip += 3
+                self.log(f'CMP AX, {hex(src)}')
+
+            # SUB, ADD, OR, ADC, SBB, AND, SUB, XOR, CMP r/m16/32, imm8 = 83 /r
+            case 0x83:
+                modrm = modRM(self)
+                value = int.from_bytes(self.fetch(1, 1), signed=True)
+                mode = modrm.reg
+                if modrm.mod == 0b11: # register direct
+                    src = self.get_reg(modrm.rm, self.get_size)
+                else:
+                    src = int.from_bytes(self.memory.read(modrm.addr, self.get_size()), "little", signed=True)
+                match mode:
+                    case 0b000: # add
+                        self.halt("add for 0x83 not supported")
+                    case 0b001: # or
+                        self.log(f"OR {hex(src)} {hex(value)}")
+                        src |= value
+
+                    case 0b010: # add with carry (adc)
+                        self.halt("adc for 0x83 not supported")
+                    case 0b011: # subtract with borrow (sbb)
+                        self.halt("sbb for 0x83 not supported")
+                    case 0b100: # and
+                        self.log(f"AND {hex(src)} {hex(value)}")
+                        src &= value
+
+                    case 0b101: # sub
+                        self.log(f"SUB {hex(src)} {hex(value)}")
+                        result = src - value  # perform subtraction
+                        self.set_flag(0, value > src)  # Set the carry flag (CF) if AL < imm8
+                        self.set_flag(2, bin(result).count(
+                            '1') % 2 == 0)  # Set the parity flag (PF) if result has even ammount of ones
+                        self.set_flag(6, result == 0)  # Set the zero flag (ZF) if result is zero
+                        self.set_flag(7, (result & 0x80) != 0)  # Set the sign flag (SF) if result is negative
+                        src = result
+
+                    case 0b110: # xor
+                        self.log(f"XOR {hex(src)} {hex(value)}")
+                        src ^= value
+
+                    case 0b111: # cmp
+                        self.log(f"CMP {hex(src)} {hex(value)}")
+                        result = src - value  # perform subtraction
+                        self.set_flag(0, value > src)  # Set the carry flag (CF) if AL < imm8
+                        self.set_flag(2, bin(result).count(
+                            '1') % 2 == 0)  # Set the parity flag (PF) if result has even ammount of ones
+                        self.set_flag(6, result == 0)  # Set the zero flag (ZF) if result is zero
+                        self.set_flag(7, (result & 0x80) != 0)  # Set the sign flag (SF) if result is negative
+
+                src = src & 0xFFFF
+                if modrm.mod == 0b11: # register direct
+                    self.set_reg(modrm.rm, src, self.get_size())
+                else:
+                    self.memory.write(modrm.addr, int.to_bytes(src, byteorder="little", signed=True, length=self.get_size()))
+                self.ip += 2 # instruction + imm8
+
+            # JMP ptr16:16/32 = EA ptr16 ptr16/32
+            case 0xEA:
+                ptr = int.from_bytes(self.fetch(1, 2), 'little')
+                segment = int.from_bytes(self.fetch(3, self.get_size()), 'little')
+                self.ip = ptr
+                self.cs = segment
+
+            # JNC/JNB/JAE rel8 = 73 ib
+            case 0x73:
+                if self.get_flag(0):  # Check if cary flag (CF) is set
+                    self.ip += 2
+                    self.log(f'JNC, no jump')
+                else:
+                    offset = self.fetch(1, 1)
+                    offset = int.from_bytes(offset, signed=True)
+                    self.ip += offset + 2  # +2 for the opcode and offset byte
+                    self.log(f'JNC {hex(offset)}')
+
+            # JNZ/JNE rel8 = 75 ib
             case 0x75:
                 if self.get_flag(6):  # Check if zero flag (ZF) is set
                     self.ip += 2
@@ -166,29 +326,32 @@ class CPU:
                     self.ip += offset + 2  # +2 for the opcode and offset byte
                     self.log(f'JNE {hex(offset)}')
 
-            case 0xE8: # CALL rel16/32 = E8
+            # CALL rel16/32 = E8
+            case 0xE8:
                 size = self.get_size()
                 offset = self.fetch(1, size)
                 offset = int.from_bytes(offset, 'little', signed=True)
                 # save pointer to stack
                 self.ip += 1 + size  # +1 for the opcode and size bytes
                 self.esp -= size  # decrease stack pointer
-                addr = self.resolve_address(self.ss, self.esp)  # get address for stack pointer
+                addr = self.resolve_address(self.ss, self.esp, False)  # get address for stack pointer
                 self.memory.write(addr, self.ip.to_bytes(size, 'little'))  # write bytes
 
                 self.ip += offset
                 self.log(f'CALL += {hex(offset)}')
 
-            case 0xC3:  # RET near = C3
+            # RET near = C3
+            case 0xC3:
                 size = self.get_size()
-                addr = self.resolve_address(self.ss, self.esp)  # get address of stack
+                addr = self.resolve_address(self.ss, self.esp, False)  # get address of stack
                 data = self.memory.read(addr, size)  # read stack
                 value = int.from_bytes(data, 'little')
                 self.esp += size # increase stack pointer
                 self.ip = value  # set instruction pointer to return address
                 self.log(f'RET, returning to {hex(value)}')
 
-            case 0xEB: # JMP rel8 = EB
+            # JMP rel8 = EB
+            case 0xEB:
                 offset = self.fetch(1, 1)
                 offset = int.from_bytes(offset, signed=True)
                 self.ip += offset + 2  # +2 for the opcode and offset byte
@@ -197,7 +360,6 @@ class CPU:
             # INT imm8 = CD+r
             case 0xCD:
                 code = self.fetch(1, 1)[0]  # fetch interrupt code
-                self.log(f'INT {hex(code)}')
                 if code == 0x10:  # BIOS video interrupt
                     if self.get_reg(4,1) == 0x0E:  # Teletype output (AH = 0x0E)
                         char = self.get_reg(0, 1)
@@ -207,13 +369,18 @@ class CPU:
                         if self.cursor_x >= 80:  # Wrap around at 80 characters
                             self.cursor_x = 0
                             self.cursor_y += 1
+                    elif self.get_reg(4, 1) == 0x02: # Set cursor possition
+                        self.cursor_x = self.get_reg(2, 1) # dl
+                        self.cursor_y = self.get_reg(6, 1) # dh
                     else:
                         self.log(f"Unhandled BIOS interrupt for 0x10, AH={hex(self.get_reg(4,1))}")
                         self.halt()
                 elif code == 0x16:  # BIOS keyboard interrupt
                     if self.get_reg(4,1) == 0x00:  # Read keyboard input (AH = 0x00)
-                        while len(self.screen.keystrokes) == 0:
+                        while len(self.screen.keystrokes) == 0 and not self.screen.exiting:
                             pass
+                        if self.screen.exiting:
+                            self.halt("Display surface quit")
                         key = self.screen.keystrokes.pop(0)
                         self.set_reg(0, key.ascii, 1) # Set AL to the ascii value of the key
                         self.set_reg(4, key.scancode, 1) # Set AH to the scancode
@@ -225,12 +392,14 @@ class CPU:
                     self.halt()
                 self.ip += 2
 
-            case 0xfa:  # CLI = FA
-                self.flags &= ~0x200  # Clear the interrupt flag (IF)
+            # CLI = FA
+            case 0xfa:
+                self.set_flag(9, 0)  # Clear the interrupt flag (IF)
                 self.log("CLI")
                 self.ip += 1
 
-            case 0x33:  # XOR r16/32, r/m16/32 = 33+r
+            # XOR r16/32, r/m16/32 = 33+r
+            case 0x33:
                 modrm = modRM(self)
                 mod = modrm.mod
                 destreg = modrm.reg
@@ -278,11 +447,15 @@ class CPU:
         else:
             return self._get_32bit(idx)
 
+    @staticmethod
+    def sreg_name(idx):
+        return ["es", "cs", "ss", "ds", "fs", "gs"][idx]
+
     def set_sreg(self, idx, value):
-        if idx == 0: self.cs = value & 0xFFFF
-        elif idx == 1: self.ds = value & 0xFFFF
-        elif idx == 2: self.es = value & 0xFFFF
-        elif idx == 3: self.ss = value & 0xFFFF
+        if idx == 0: self.es = value & 0xFFFF
+        elif idx == 1: self.cs = value & 0xFFFF
+        elif idx == 2: self.ss = value & 0xFFFF
+        elif idx == 3: self.ds = value & 0xFFFF
         elif idx == 4: self.fs = value & 0xFFFF
         elif idx == 5: self.gs = value & 0xFFFF
 
@@ -346,12 +519,15 @@ class CPU:
     @staticmethod
     def reg_name(idx, size=4):
         reg_names = {
+            1: ["AL", "CL", "DL", "BL", "AH", "CH", "DH", "BH"],
             2: ["AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI"],
             4: ["EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"]
         }
         return reg_names[size][idx]
 
-    def resolve_address(self, segment, offset):
+    def resolve_address(self, segment, offset, overide=True):
+        if overide and self.segment_override:
+            segment = self.segment_override
         if self.real_mode:
             return (segment * 16) + offset  # Real mode: segment * 16 + offset
         else:
@@ -360,7 +536,7 @@ class CPU:
             return offset
 
     def fetch(self, offset=0, size=1):
-        addr = self.resolve_address(self.cs, self.ip + offset)
+        addr = self.resolve_address(self.cs, self.ip + offset, False)
         return self.memory.read(addr, size)
 
     def get_size(self):
@@ -379,7 +555,6 @@ class CPU:
     def halt(error_message='Halting CPU execution'):
         print(error_message)
         exit()
-
 
     def log(self, message):
         if self.debug_mode:

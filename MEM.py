@@ -6,7 +6,6 @@ class AddressSpace:
         if len(self.content) < len(obj) + address:
             self.content.extend([0x00] * ((len(obj) + address) - len(self.content)))
             print(f"[ADDRESSSPACE] map object of length {len(self.content)}")
-
         for i in range(len(obj)):
             self.content[i + address] = obj[i]
 

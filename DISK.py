@@ -1,6 +1,6 @@
 class Disk:
-    def __init__(self):
-        with open('dos.img', 'br') as f:
+    def __init__(self, file):
+        with open(file, 'br') as f:
             self.content = bytearray(f.read())
         self.length = len(self.content)
 
