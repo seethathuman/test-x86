@@ -32,13 +32,17 @@ debug = True
 cpu = CPU(debug_mode=debug)
 address = AddressSpace()
 floppy = Disk("dos.img")
-bios = Disk("bios.bin")
+bios = Disk("bios.bin").content
+
+com = Disk("tests.com")
+
 bootsector = floppy[0:512]
 
-address.map([0x00] * 0xFFFFF, 0x0) # 16-bit addressable space
-address.map(bootsector, 0x7c00) # bootloader placed at 7c00
-address.map(bios, 0xF0000)
-address.write(0xFFFF0, b'\xEA\x00\x00\x00\xF0') # jump to F0000 placed at reset vector
+address.write(0x0000, bytearray([0x00] * 0xFFFFF)) # 16-bit addressable space
+address.write(0x7c00, bootsector) # bootloader placed at 7c00
+address.map(0x100, com)
+address.write(0xF0000, bios)
+address.write(0xFFFF0, bytes(b'\xEA\x00\x00\x00\xF0')) # jump to F0000 placed at reset vector
 
 cpu.memory = address
 
@@ -50,6 +54,7 @@ buff: bytearray = address[0xB8000:0xB8FA0]
 screen_thread_ = Thread(target=screen_thread)
 screen_thread_.daemon = True
 screen_thread_.start()
+
 while not screen:
     sleep(0.1)
 

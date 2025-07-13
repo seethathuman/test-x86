@@ -1,7 +1,7 @@
 class ModRM:
     def __init__(self, cpu, byte=None):
         self.cpu = cpu
-        self.size = cpu.get_size()  # 2 or 4
+        self.size = cpu.size  # 2 or 4
         self.addr = None
         self.disp = 0
 
@@ -23,14 +23,14 @@ class ModRM:
     def _resolve_real_mode(self):
         # 16-bit addressing using legacy rules
         reg_pairs = [
-            lambda: self.cpu.bx + self.cpu.si,
-            lambda: self.cpu.bx + self.cpu.di,
-            lambda: self.cpu.bp + self.cpu.si,
-            lambda: self.cpu.bp + self.cpu.di,
-            lambda: self.cpu.si,
-            lambda: self.cpu.di,
+            lambda: self.cpu.ebx + self.cpu.esi,
+            lambda: self.cpu.ebx + self.cpu.edi,
+            lambda: self.cpu.ebp + self.cpu.esi,
+            lambda: self.cpu.ebp + self.cpu.edi,
+            lambda: self.cpu.esi,
+            lambda: self.cpu.edi,
             lambda: self.disp,
-            lambda: self.cpu.bx
+            lambda: self.cpu.ebx
         ]
 
         base = 0
@@ -54,7 +54,7 @@ class ModRM:
             return
 
         segment = self.cpu.ds if self.rm != 0b110 else self.cpu.ss
-        self.addr = self.cpu.resolve_address(segment, base)
+        self.addr: int = self.cpu.resolve_address(segment, base)
 
     def _resolve_protected_mode(self):
         # 32-bit addressing with SIB support
@@ -67,7 +67,6 @@ class ModRM:
             index = (sib & 0b00111000) >> 3
             base = sib & 0b00000111
 
-            base_val = 0
             index_val = 0
 
             if base == 5 and self.mod == 0b00:

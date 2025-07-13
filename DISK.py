@@ -17,4 +17,5 @@ class Disk:
         return self.content[item]
 
     def __setitem__(self, key, value):
+        if isinstance(value, bytes): value = value[0]
         self.content[key] = value

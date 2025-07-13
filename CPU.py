@@ -1,5 +1,6 @@
 from modRM import ModRM as modRM
 from MEM import AddressSpace
+
 class CPU:
     def __init__(self, real_mode=True, debug_mode=False):
         # https://wiki.osdev.org/CPU_Registers_x86
@@ -56,6 +57,7 @@ class CPU:
         self.debug_mode = debug_mode
 
         # CPU state
+        self.size = 2
         self.real_mode = real_mode
         self.cursor_x = 0
         self.cursor_y = 0
@@ -66,7 +68,7 @@ class CPU:
         self.operand_override = False
 
 
-    def execute(self):
+    def execute(self) -> None:
         # Fetch prefix bytes first
         prefix = self.fetch()[0]
         if self.overide_count < 4:
@@ -82,7 +84,14 @@ class CPU:
                 self.overide_count += 1
                 self.execute()
                 return
+            if prefix == 0x26:
+                self.segment_override = self.es
+                self.ip += 1
+                self.overide_count += 1
+                self.execute()
+                return
 
+        self.size = self.get_size()
         # Two-byte opcodes start with 0x0F
         if prefix == 0x0F:
             self.match_long()
@@ -93,7 +102,7 @@ class CPU:
         self.segment_override = None
         self.overide_count = 0
 
-    def match_short(self):
+    def match_short(self) -> None:
         opcode = self.fetch()[0]
 
         match opcode:
@@ -107,50 +116,71 @@ class CPU:
                 self.log("NOP")
                 self.ip += 1
 
+            # MOV r/m8, r8 = 88 /r
+            case 0x88:
+                modrm = modRM(self)
+                value = self.get_reg(modrm.reg, 1)
+                if modrm.mod == 0b11:  # register to register
+                    self.set_reg(modrm.rm, value, 1)
+                    self.log(f"MOV {self.reg_name(modrm.rm, 1)}, {hex(value)}")
+                else:
+                    self.memory.write(modrm.addr, value.to_bytes(length=2, byteorder="little", signed=True))
+                    self.log(f"MOV {hex(modrm.addr)}, {hex(value)}")
+                self.ip += 1
+
             # MOV r/m16/32, r16/32 = 89 /r
             case 0x89:
                 modrm = modRM(self)
-                size = self.get_size()
-                value = self.get_reg(modrm.reg, size)
+                value = self.get_reg(modrm.reg, self.size)
                 if modrm.mod == 0b11: # register to register
-                    self.set_reg(modrm.rm, value, size)
-                    self.log(f"MOV {self.reg_name(modrm.rm, size)}, {hex(value)}")
+                    self.set_reg(modrm.rm, value, self.size)
+                    self.log(f"MOV {self.reg_name(modrm.rm, self.size)}, {hex(value)}")
                 else:
-                    self.memory.write(modrm.addr, value)
+                    self.memory.write(modrm.addr, value.to_bytes(length=2, byteorder="little", signed=True))
                     self.log(f"MOV {hex(modrm.addr)}, {hex(value)}")
                 self.ip += 1
 
             # MOV r/m16/32, imm16/32 = C7 /0 imm
             case 0xC7:
-                size = self.get_size()
                 modrm = modRM(self)
-                value = self.fetch(1, size)
+                value = self.fetch(1, self.size)
                 if modrm.reg:
                     self.halt("REG is non-0 while executing /0 instruction")
                 if modrm.mod == 0b11: # register direct
-                    self.set_reg(modrm.rm, value, size)
-                    self.log(f"MOV {self.reg_name(modrm.rm, size)} {hex(int.from_bytes(value, 'little'))}")
+                    self.set_reg(modrm.rm, int.from_bytes(value, 'little'), self.size)
+                    self.log(f"MOV {self.reg_name(modrm.rm, self.size)} {hex(int.from_bytes(value, 'little'))}")
                 else: # direct memory addressing
                     self.memory.write(modrm.addr, value)
                     self.log(f"MOV {hex(modrm.addr)} {hex(int.from_bytes(value, 'little'))}")
-                self.ip += 1 + size
+                self.ip += 1 + self.size
 
             # MOV r16/32, imm16/32 = B8+r
             case 0xB8 | 0xB9 | 0xBA | 0xBB | 0xBC | 0xBD | 0xBE | 0xBF:
                 reg = opcode - 0xB8 # get register id
-                size = self.get_size() # get size of operand
-                imm = int.from_bytes(self.fetch(1, size), 'little')
-                self.set_reg(reg, imm, size)
-                self.log(f"MOV {self.reg_name(reg, size)}, {hex(imm)}")
-                self.ip += 1 + size
+                imm = int.from_bytes(self.fetch(1, self.size), 'little', signed=True)
+                self.set_reg(reg, imm, self.size)
+                self.log(f"MOV {self.reg_name(reg, self.size)}, {hex(imm)}")
+                self.ip += 1 + self.size
 
             # MOV r8, imm8 = B0+r
             case 0xB0 | 0xB1 | 0xB2 | 0xB3 | 0xB4 | 0xB5 | 0xB6 | 0xB7:
                 reg = opcode - 0xB0  # get register id
-                imm = int.from_bytes(self.fetch(1, 1), 'little')
+                imm = int.from_bytes(self.fetch(1, 1))
                 self.set_reg(reg, imm, 1)
                 self.log(f"MOV r8 {self.reg_name(reg, 1)}, {hex(imm)}")
                 self.ip += 2
+
+            # MOV r16/r32/m16, Sreg = 8C /r
+            case 0x8C:
+                modrm = modRM(self)
+                value = self.get_sreg(modrm.reg)
+                if modrm.mod == 0b11: # register 16/32
+                    self.set_reg(modrm.rm, value, self.size)
+                    self.log(f"MOV {self.reg_name(modrm.rm, self.size)}, {self.sreg_name(modrm.reg)}")
+                else: # mem 16
+                    self.memory.write(modrm.addr, value.to_bytes(2, "little"))
+                    self.log(f"MOV {hex(modrm.addr)}, {self.sreg_name(modrm.reg)}")
+                self.ip += 1
 
             # MOV Sreg, r/m16/32 = 8E /r
             case 0x8E:
@@ -160,53 +190,49 @@ class CPU:
                 reg = modrm.reg  # Segment register
                 rm = modrm.rm  # Source register/memory
 
-                size = self.get_size()
                 if mod == 0b11:  # Register to register
-                    self.set_sreg(reg, self.get_reg(rm, size))
+                    self.set_sreg(reg, self.get_reg(rm, self.size))
                     self.log(f"MOV {self.sreg_name(reg)}, {hex(self.get_reg(rm, 2))}")
                 else:
-                   self.set_sreg(reg, self.memory.read(modrm.addr, 2))
+                   self.set_sreg(reg, int.from_bytes(self.memory.read(modrm.addr, 2), "little"))
                 self.ip += 1
 
             # LES r16/32, m16:16/32 = C4 /r
             case 0xC4:
                 modrm_byte = modRM(self)
                 addr = modrm_byte.addr
-                size = self.get_size()
                 reg = modrm_byte.reg  # Register to load into
 
                 # Read offset and segment from memory
-                raw = self.memory.read(addr, size + 2)
-                offset_val = int.from_bytes(raw[:size], 'little')
-                segment_val = int.from_bytes(raw[size:], 'little')
+                raw = self.memory.read(addr, self.size + 2)
+                offset_val = int.from_bytes(raw[:self.size], 'little')
+                segment_val = int.from_bytes(raw[self.size:], 'little')
 
-                self.set_reg(reg, offset_val, size)
+                self.set_reg(reg, offset_val, self.size)
                 self.es = segment_val
 
-                self.log(f"LES {self.reg_name(reg, size)}, [{hex(addr)}] => {hex(offset_val)}:{hex(segment_val)}")
+                self.log(f"LES {self.reg_name(reg, self.size)}, [{hex(addr)}] => {hex(offset_val)}:{hex(segment_val)}")
                 self.ip += 1
 
             # PUSH r16/32 = 50+r
             case 0x50 | 0x51 | 0x52 | 0x53 | 0x54 | 0x55 | 0x56 | 0x57:
                 reg = opcode - 0x50 # get register id
-                size = self.get_size() # get size of operand
-                value = self.get_reg(reg, size) # get register value
-                self.esp -= size # decrease stack pointer
+                value = self.get_reg(reg, self.size) # get register value
+                self.esp -= self.size # decrease stack pointer
                 addr = self.resolve_address(self.ss, self.esp, False) # get address for stack pointer
-                self.memory.write(addr, value.to_bytes(size, 'little')) # write bytes
-                self.log(f"PUSH {self.reg_name(reg, size)}")
+                self.memory.write(addr, value.to_bytes(self.size, 'little')) # write bytes
+                self.log(f"PUSH {self.reg_name(reg, self.size)}")
                 self.ip += 1
 
             # POP r16/32 = 58+r
             case 0x58 | 0x59 | 0x5A | 0x5B | 0x5C | 0x5D | 0x5E | 0x5F:
                 reg = opcode - 0x58 # get register id
-                size = self.get_size() # get size of operand
                 addr = self.resolve_address(self.ss, self.esp, False) # get address of stack
-                data = self.memory.read(addr, size) # read stack
-                value = int.from_bytes(data, 'little')
-                self.set_reg(reg, value, size) # set register value
-                self.esp += size # increase stack pointer
-                self.log(f"POP {self.reg_name(reg, size)}")
+                data = self.memory.read(addr, self.size) # read stack
+                value = int.from_bytes(data, 'little', signed=True)
+                self.set_reg(reg, value, self.size) # set register value
+                self.esp += self.size # increase stack pointer
+                self.log(f"POP {self.reg_name(reg, self.size)}")
                 self.ip += 1
 
             # LODSB = AC
@@ -249,9 +275,9 @@ class CPU:
                 value = int.from_bytes(self.fetch(1, 1), signed=True)
                 mode = modrm.reg
                 if modrm.mod == 0b11: # register direct
-                    src = self.get_reg(modrm.rm, self.get_size)
+                    src = self.get_reg(modrm.rm, self.size)
                 else:
-                    src = int.from_bytes(self.memory.read(modrm.addr, self.get_size()), "little", signed=True)
+                    src = int.from_bytes(self.memory.read(modrm.addr, self.size), "little", signed=True)
                 match mode:
                     case 0b000: # add
                         self.halt("add for 0x83 not supported")
@@ -292,15 +318,70 @@ class CPU:
 
                 src = src & 0xFFFF
                 if modrm.mod == 0b11: # register direct
-                    self.set_reg(modrm.rm, src, self.get_size())
+                    self.set_reg(modrm.rm, src, self.size)
                 else:
-                    self.memory.write(modrm.addr, int.to_bytes(src, byteorder="little", signed=True, length=self.get_size()))
+                    self.memory.write(modrm.addr, int.to_bytes(src, byteorder="little", signed=True, length=self.size))
                 self.ip += 2 # instruction + imm8
+
+            # SUB, ADD, OR, ADC, SBB, AND, SUB, XOR, CMP r/m8, imm8 = 80 /r
+            case 0x80:
+                modrm = modRM(self)
+                value = int.from_bytes(self.fetch(1, 1), signed=True)
+                mode = modrm.reg
+                if modrm.mod == 0b11:  # register direct
+                    src = self.get_reg(modrm.rm, 1)
+                else:
+                    src = int.from_bytes(self.memory.read(modrm.addr, 1), "little", signed=True)
+                match mode:
+                    case 0b000:  # add
+                        self.halt("add for 0x80 not supported")
+                    case 0b001:  # or
+                        self.log(f"OR {hex(src)} {hex(value)}")
+                        src |= value
+
+                    case 0b010:  # add with carry (adc)
+                        self.halt("adc for 0x80 not supported")
+                    case 0b011:  # subtract with borrow (sbb)
+                        self.halt("sbb for 0x80 not supported")
+                    case 0b100:  # and
+                        self.log(f"AND {hex(src)} {hex(value)}")
+                        src &= value
+
+                    case 0b101:  # sub
+                        self.log(f"SUB {hex(src)} {hex(value)}")
+                        result = src - value  # perform subtraction
+                        self.set_flag(0, value > src)  # Set the carry flag (CF) if AL < imm8
+                        self.set_flag(2, bin(result).count(
+                            '1') % 2 == 0)  # Set the parity flag (PF) if result has even ammount of ones
+                        self.set_flag(6, result == 0)  # Set the zero flag (ZF) if result is zero
+                        self.set_flag(7, (result & 0x80) != 0)  # Set the sign flag (SF) if result is negative
+                        src = result
+
+                    case 0b110:  # xor
+                        self.log(f"XOR {hex(src)} {hex(value)}")
+                        src ^= value
+
+                    case 0b111:  # cmp
+                        self.log(f"CMP {hex(src)} {hex(value)}")
+                        result = src - value  # perform subtraction
+                        self.set_flag(0, value > src)  # Set the carry flag (CF) if AL < imm8
+                        self.set_flag(2, bin(result).count(
+                            '1') % 2 == 0)  # Set the parity flag (PF) if result has even ammount of ones
+                        self.set_flag(6, result == 0)  # Set the zero flag (ZF) if result is zero
+                        self.set_flag(7, (result & 0x80) != 0)  # Set the sign flag (SF) if result is negative
+
+                src = src & 0xFFFF
+                if modrm.mod == 0b11:  # register direct
+                    self.set_reg(modrm.rm, src, 1)
+                else:
+                    self.memory.write(modrm.addr,
+                                      int.to_bytes(src, byteorder="little", signed=True))
+                self.ip += 2  # instruction + imm8
 
             # JMP ptr16:16/32 = EA ptr16 ptr16/32
             case 0xEA:
                 ptr = int.from_bytes(self.fetch(1, 2), 'little')
-                segment = int.from_bytes(self.fetch(3, self.get_size()), 'little')
+                segment = int.from_bytes(self.fetch(3, self.size), 'little')
                 self.ip = ptr
                 self.cs = segment
 
@@ -328,25 +409,23 @@ class CPU:
 
             # CALL rel16/32 = E8
             case 0xE8:
-                size = self.get_size()
-                offset = self.fetch(1, size)
+                offset = self.fetch(1, self.size)
                 offset = int.from_bytes(offset, 'little', signed=True)
                 # save pointer to stack
-                self.ip += 1 + size  # +1 for the opcode and size bytes
-                self.esp -= size  # decrease stack pointer
+                self.ip += 1 + self.size  # +1 for the opcode and size bytes
+                self.esp -= self.size  # decrease stack pointer
                 addr = self.resolve_address(self.ss, self.esp, False)  # get address for stack pointer
-                self.memory.write(addr, self.ip.to_bytes(size, 'little'))  # write bytes
+                self.memory.write(addr, self.ip.to_bytes(self.size, 'little'))  # write bytes
 
                 self.ip += offset
                 self.log(f'CALL += {hex(offset)}')
 
             # RET near = C3
             case 0xC3:
-                size = self.get_size()
                 addr = self.resolve_address(self.ss, self.esp, False)  # get address of stack
-                data = self.memory.read(addr, size)  # read stack
+                data = self.memory.read(addr, self.size)  # read stack
                 value = int.from_bytes(data, 'little')
-                self.esp += size # increase stack pointer
+                self.esp += self.size # increase stack pointer
                 self.ip = value  # set instruction pointer to return address
                 self.log(f'RET, returning to {hex(value)}')
 
@@ -357,7 +436,7 @@ class CPU:
                 self.ip += offset + 2  # +2 for the opcode and offset byte
                 self.log(f'JMP {hex(offset)}')
 
-            # INT imm8 = CD+r
+            # INT imm8 = CD r
             case 0xCD:
                 code = self.fetch(1, 1)[0]  # fetch interrupt code
                 if code == 0x10:  # BIOS video interrupt
@@ -398,40 +477,69 @@ class CPU:
                 self.log("CLI")
                 self.ip += 1
 
-            # XOR r16/32, r/m16/32 = 33+r
+            # XOR r/m8, r8 = 30 /r
+            case 0x30:
+                modrm = modRM(self)
+                if modrm.mod == 0b11: # register direct
+                    src = self.get_reg(modrm.rm, 1)
+                else:
+                    src = self.memory.read(modrm.addr, 1)[0]
+                result = src ^ self.get_reg(modrm.reg, 1)
+                if modrm.mod == 0b11: # register direct
+                    self.set_reg(modrm.rm, result, 1)
+                else:
+                    self.memory.write(modrm.addr, result.to_bytes())
+                self.log(f"XOR r/m8, {self.reg_name(modrm.reg, 1)}")
+                self.ip += 1
+
+            # XOR r/m16/32, r16/32 = 31 /r
+            case 0x31:
+                modrm = modRM(self)
+                if modrm.mod == 0b11:  # register direct
+                    src = self.get_reg(modrm.rm, 2)
+                else:
+                    src = int.from_bytes(self.memory.read(modrm.addr, 2), "little")
+                result = src ^ self.get_reg(modrm.reg, 2)
+                if modrm.mod == 0b11:  # register direct
+                    self.set_reg(modrm.rm, result, 2)
+                else:
+                    self.memory.write(modrm.addr, result.to_bytes(2, byteorder="little", signed=True))
+                self.log(f"XOR r/m16, {self.reg_name(modrm.reg, 2)}")
+                self.ip += 1
+
+            # XOR r16/32, r/m16/32 = 33 /r
             case 0x33:
                 modrm = modRM(self)
                 mod = modrm.mod
                 destreg = modrm.reg
                 sourcereg = modrm.rm
-                size = self.get_size()
                 self.ip += 1
 
                 if mod == 0b11:  # Register to register
-                    src = self.get_reg(sourcereg, size)
-                    dest = self.get_reg(destreg, size)
+                    src = self.get_reg(sourcereg, self.size)
+                    dest = self.get_reg(destreg, self.size)
                     result = src ^ dest
-                    self.set_reg(destreg, result, size)
-                    self.log(f'XOR {self.reg_name(destreg, size)}, {self.reg_name(sourcereg, size)}')
+                    self.set_reg(destreg, result, self.size)
+                    self.log(f'XOR {self.reg_name(destreg, self.size)}, {self.reg_name(sourcereg, self.size)}')
                 else:
                     addr = modrm.addr
-                    src = self.get_reg(sourcereg, size)
-                    dest = self.memory.read(addr, size)
+                    src = self.get_reg(sourcereg, self.size)
+                    dest = int.from_bytes(self.memory.read(addr, self.size), "little", signed=True)
                     result = src ^ dest
-                    self.set_reg(destreg, result, size)
-                    self.log(f'XOR {self.reg_name(destreg, size)}, {hex(addr)}')
+                    self.set_reg(destreg, result, self.size)
+                    self.log(f'XOR {self.reg_name(destreg, self.size)}, {hex(addr)}')
             case _:
                 self.log(f'unknown opcode: {hex(opcode)}')
                 self.ip += 1
                 self.halt()
 
-    def match_long(self):
+    def match_long(self) -> None:
         self.ip += 1
         opcode = self.fetch(0, 1)[0]
         self.log(f"Unknown Opcode: 0F{hex(opcode)}")
         self.ip += 1
 
-    def set_reg(self, idx, value, size):
+    def set_reg(self, idx:int, value:int, size:int) -> None:
         if size == 1:
             self._set_8bit(idx, value)
         elif size == 2:
@@ -439,7 +547,7 @@ class CPU:
         else:
             self._set_32bit(idx, value)
 
-    def get_reg(self, idx, size):
+    def get_reg(self, idx: int, size: int) -> int:
         if size == 1:
             return self._get_8bit(idx)
         elif size == 2:
@@ -448,10 +556,10 @@ class CPU:
             return self._get_32bit(idx)
 
     @staticmethod
-    def sreg_name(idx):
+    def sreg_name(idx:int) -> str:
         return ["es", "cs", "ss", "ds", "fs", "gs"][idx]
 
-    def set_sreg(self, idx, value):
+    def set_sreg(self, idx: int, value: int) -> None:
         if idx == 0: self.es = value & 0xFFFF
         elif idx == 1: self.cs = value & 0xFFFF
         elif idx == 2: self.ss = value & 0xFFFF
@@ -459,7 +567,17 @@ class CPU:
         elif idx == 4: self.fs = value & 0xFFFF
         elif idx == 5: self.gs = value & 0xFFFF
 
-    def _set_16bit(self, idx, val):
+    def get_sreg(self, idx: int) -> int:
+        if idx == 0: return self.es
+        elif idx == 1: return self.cs
+        elif idx == 2: return self.ss
+        elif idx == 3: return self.ds
+        elif idx == 4: return self.fs
+        elif idx == 5: return self.gs
+        self.halt(f"invalid sreg id {idx}")
+        return 0
+
+    def _set_16bit(self, idx: int, val: int) -> None:
         if idx == 0: self.eax = (self.eax & 0xFFFF0000) | (val & 0xFFFF)
         elif idx == 1: self.ecx = (self.ecx & 0xFFFF0000) | (val & 0xFFFF)
         elif idx == 2: self.edx = (self.edx & 0xFFFF0000) | (val & 0xFFFF)
@@ -469,7 +587,7 @@ class CPU:
         elif idx == 6: self.esi = (self.esi & 0xFFFF0000) | (val & 0xFFFF)
         elif idx == 7: self.edi = (self.edi & 0xFFFF0000) | (val & 0xFFFF)
 
-    def _set_8bit(self, idx, val):
+    def _set_8bit(self, idx: int, val: int) -> None:
         if idx == 0: self.eax = (self.eax & 0xFFFFFF00) | (val & 0xFF)
         elif idx == 1: self.ecx = (self.ecx & 0xFFFFFF00) | (val & 0xFF)
         elif idx == 2: self.edx = (self.edx & 0xFFFFFF00) | (val & 0xFF)
@@ -479,7 +597,7 @@ class CPU:
         elif idx == 6: self.edx = (self.edx & 0xFFFF00FF) | ((val & 0xFF) << 8)
         elif idx == 7: self.ebx = (self.ebx & 0xFFFF00FF) | ((val & 0xFF) << 8)
 
-    def _set_32bit(self, idx, val):
+    def _set_32bit(self, idx: int, val: int) -> None:
         match idx:
             case 0: self.eax = val
             case 1: self.ecx = val
@@ -490,7 +608,7 @@ class CPU:
             case 6: self.esi = val
             case 7: self.edi = val
 
-    def _get_16bit(self, idx):
+    def _get_16bit(self, idx:int) -> int:
         match idx:
             case 0: return self.eax & 0xFFFF
             case 1: return self.ecx & 0xFFFF
@@ -500,8 +618,11 @@ class CPU:
             case 5: return self.ebp & 0xFFFF
             case 6: return self.esi & 0xFFFF
             case 7: return self.edi & 0xFFFF
+            case _:
+                self.halt(f"unknown register {idx}")
+                return 0
 
-    def _get_8bit(self, idx):
+    def _get_8bit(self, idx:int) -> int:
         match idx:
             case 0: return self.eax & 0xFF
             case 1: return self.ecx & 0xFF
@@ -511,13 +632,16 @@ class CPU:
             case 5: return (self.ecx >> 8) & 0xFF
             case 6: return (self.edx >> 8) & 0xFF
             case 7: return (self.ebx >> 8) & 0xFF
+            case _:
+                self.halt(f"unknown register {idx}")
+                return 0
 
-    def _get_32bit(self, idx):
+    def _get_32bit(self, idx:int) -> int:
         return [self.eax, self.ecx, self.edx, self.ebx,
                 self.esp, self.ebp, self.esi, self.edi][idx]
 
     @staticmethod
-    def reg_name(idx, size=4):
+    def reg_name(idx:int, size:int=4) -> str:
         reg_names = {
             1: ["AL", "CL", "DL", "BL", "AH", "CH", "DH", "BH"],
             2: ["AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI"],
@@ -525,7 +649,7 @@ class CPU:
         }
         return reg_names[size][idx]
 
-    def resolve_address(self, segment, offset, overide=True):
+    def resolve_address(self, segment:int, offset:int, overide=True) -> int:
         if overide and self.segment_override:
             segment = self.segment_override
         if self.real_mode:
@@ -535,27 +659,27 @@ class CPU:
             # For now, return just the offset (flat model)
             return offset
 
-    def fetch(self, offset=0, size=1):
+    def fetch(self, offset=0, size=1) -> bytes:
         addr = self.resolve_address(self.cs, self.ip + offset, False)
         return self.memory.read(addr, size)
 
-    def get_size(self):
+    def get_size(self) -> int:
         return 2 if self.real_mode or self.operand_override else 4
 
-    def get_flag(self, flag):
+    def get_flag(self, flag:int) -> int:
         return (self.flags >> flag) & 1
 
-    def set_flag(self, flag, value):
+    def set_flag(self, flag:int, value:int) -> None:
         if value:
             self.flags |= (1 << flag)
         else:
             self.flags &= ~(1 << flag)
 
     @staticmethod
-    def halt(error_message='Halting CPU execution'):
+    def halt(error_message='Halting CPU execution') -> None:
         print(error_message)
         exit()
 
-    def log(self, message):
+    def log(self, message) -> None:
         if self.debug_mode:
             print(f"[CPU] {message}")

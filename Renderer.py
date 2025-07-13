@@ -1,3 +1,8 @@
+# This file was created by AI
+# kinda funny how I can make an entire x86 emulator,
+# but be too lazy to make a program to render some text
+# I know this is probably not how the display buffer
+# works, but it works well enough for now
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from numpy import ndarray
@@ -44,8 +49,8 @@ def render_text_buffer_to_rgb(buffer: bytearray) -> np.ndarray:
     for row in range(rows):
         for col in range(cols):
             i = (row * cols + col) * 2
-            char_code = buffer[i]
-            attr = buffer[i + 1]
+            char_code = buffer[i][0]
+            attr = buffer[i + 1][0]
             fg_color = VGA_PALETTE[attr & 0x0F]
             bg_color = VGA_PALETTE[(attr >> 4) & 0x0F]
             try:
