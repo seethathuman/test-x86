@@ -51,6 +51,7 @@ class CPU:
         self.gdtr = self.ldtr = self.idtr = 0
 
         # System state
+        self.video_mode = 0x0E
         self.memory: AddressSpace = AddressSpace()
         self.screen = None
         self.debug_val = 0
@@ -114,6 +115,18 @@ class CPU:
             # NOP = 90
             case 0x90:
                 self.log("NOP")
+                self.ip += 1
+
+            # MOV r8, r/m8 = 8A /r
+            case 0x8A:
+                modrm = modRM(self)
+                if modrm.mod == 0b11:  # register to register
+                    value = self.get_reg(modrm.rm, 1)
+                    self.log(f"MOV {self.reg_name(modrm.reg, 1)}, {hex(value)}")
+                else:
+                    value = int.from_bytes(self.memory.read(modrm.addr, 1), signed=True)
+                    self.log(f"MOV {self.reg_name(modrm.reg, 1)}, {hex(modrm.addr)} ({hex(value)})")
+                self.set_reg(modrm.reg, value, 1)
                 self.ip += 1
 
             # MOV r/m8, r8 = 88 /r
@@ -244,6 +257,16 @@ class CPU:
                 self.ip += 1
                 self.log(f'LODSB => AL = {hex(byte)}, ESI = {hex(self.esi)}, resolved address = {hex(addr)}')
 
+            # STOSB = AA
+            case 0xAA:
+                addr = self.resolve_address(self.es, self.edi)  # Address in ES:DI
+                byte = self.get_reg(0, 1)  # Load byte from AL
+                self.memory.write(addr, byte.to_bytes(signed=True))
+
+                self.edi += (self.get_flag(10) * -2) + 1 # get direction flag (DF) (1 = -1, 0 = +1)
+                self.ip += 1
+                self.log(f'STOSB => AL = {hex(byte)}, EDI = {hex(self.edi)}, resolved address = {hex(addr)}')
+
             # CMP AL, imm8 = 3C ib
             case 0x3C:
                 src = self.fetch(1, 1)[0]  # fetch immediate byte
@@ -280,10 +303,22 @@ class CPU:
                     src = int.from_bytes(self.memory.read(modrm.addr, self.size), "little", signed=True)
                 match mode:
                     case 0b000: # add
-                        self.halt("add for 0x83 not supported")
+                        self.log(f"ADD {hex(src)} {hex(value)}")
+                        result = src + value  # perform subtraction
+                        self.set_flag(0, result > 255)  # Set the carry flag (CF) if AL + imm8 > 255
+                        self.set_flag(2, bin(result).count(
+                            '1') % 2 == 0)  # Set the parity flag (PF) if result has even ammount of ones
+                        self.set_flag(6, result == 0)  # Set the zero flag (ZF) if result is zero
+                        self.set_flag(7, (result & 0x80) != 0)  # Set the sign flag (SF) if result is negative
+                        src = result
                     case 0b001: # or
                         self.log(f"OR {hex(src)} {hex(value)}")
                         src |= value
+                        self.set_flag(2, bin(src).count('1') % 2 == 0)
+                        self.set_flag(6, src == 0)
+                        self.set_flag(7, src < 0)  # Negative flag
+                        self.set_flag(11, 0)  # Overflow Flag (OF): cleared
+                        self.set_flag(0, 0)  # Carry Flag (CF): cleared
 
                     case 0b010: # add with carry (adc)
                         self.halt("adc for 0x83 not supported")
@@ -306,6 +341,11 @@ class CPU:
                     case 0b110: # xor
                         self.log(f"XOR {hex(src)} {hex(value)}")
                         src ^= value
+                        self.set_flag(2, bin(src).count('1') % 2 == 0)
+                        self.set_flag(6, src == 0)
+                        self.set_flag(7, src < 0) # Negative flag
+                        self.set_flag(11, 0) # Overflow Flag (OF): cleared
+                        self.set_flag(0, 0) # Carry Flag (CF): cleared
 
                     case 0b111: # cmp
                         self.log(f"CMP {hex(src)} {hex(value)}")
@@ -323,6 +363,25 @@ class CPU:
                     self.memory.write(modrm.addr, int.to_bytes(src, byteorder="little", signed=True, length=self.size))
                 self.ip += 2 # instruction + imm8
 
+            case 0x08:  # or r/m8 r8 = 08 /r
+                modrm = modRM(self)
+                if modrm.mod == 0b11:  # register direct
+                    src = self.get_reg(modrm.rm, 1)
+                else:
+                    src = int.from_bytes(self.memory.read(modrm.addr, 1), "little")
+                src |= self.get_reg(modrm.reg, 1)
+                if modrm.mod == 0b11:  # register direct
+                    self.set_reg(modrm.rm, src, 1)
+                else:
+                    self.memory.write(modrm.addr, src.to_bytes(1, signed=True))
+                self.log(f"OR {hex(src)} {hex(self.get_reg(modrm.reg, 1))}")
+                self.set_flag(2, bin(src).count('1') % 2 == 0)
+                self.set_flag(6, src == 0)
+                self.set_flag(7, src < 0)  # Negative flag
+                self.set_flag(11, 0)  # Overflow Flag (OF): cleared
+                self.set_flag(0, 0)  # Carry Flag (CF): cleared
+                self.ip += 1
+
             # SUB, ADD, OR, ADC, SBB, AND, SUB, XOR, CMP r/m8, imm8 = 80 /r
             case 0x80:
                 modrm = modRM(self)
@@ -338,6 +397,11 @@ class CPU:
                     case 0b001:  # or
                         self.log(f"OR {hex(src)} {hex(value)}")
                         src |= value
+                        self.set_flag(2, bin(src).count('1') % 2 == 0)
+                        self.set_flag(6, src == 0)
+                        self.set_flag(7, src < 0)  # Negative flag
+                        self.set_flag(11, 0)  # Overflow Flag (OF): cleared
+                        self.set_flag(0, 0)  # Carry Flag (CF): cleared
 
                     case 0b010:  # add with carry (adc)
                         self.halt("adc for 0x80 not supported")
@@ -360,6 +424,11 @@ class CPU:
                     case 0b110:  # xor
                         self.log(f"XOR {hex(src)} {hex(value)}")
                         src ^= value
+                        self.set_flag(2, bin(src).count('1') % 2 == 0)
+                        self.set_flag(6, src == 0)
+                        self.set_flag(7, src < 0)  # Negative flag
+                        self.set_flag(11, 0)  # Overflow Flag (OF): cleared
+                        self.set_flag(0, 0)  # Carry Flag (CF): cleared
 
                     case 0b111:  # cmp
                         self.log(f"CMP {hex(src)} {hex(value)}")
@@ -407,6 +476,31 @@ class CPU:
                     self.ip += offset + 2  # +2 for the opcode and offset byte
                     self.log(f'JNE {hex(offset)}')
 
+            # loop rel8 = E2 cb
+            case 0xE2:
+                ecx = self.get_reg(1, self.size)
+                ecx -= 1
+                self.set_reg(1, ecx, self.size)
+                if ecx == 0:
+                    self.ip += 2
+                    self.log(f'loop, no jump, ecx = 0')
+                else:
+                    offset = self.fetch(1, 1)
+                    offset = int.from_bytes(offset, signed=True)
+                    self.ip += offset + 2  # +2 for the opcode and offset byte
+                    self.log(f'loop {hex(offset)}, ecx = {ecx}')
+
+            # JE rel8 = 74 ib
+            case 0x74:
+                if not self.get_flag(6):  # Check if zero flag (ZF) is set
+                    self.ip += 2
+                    self.log(f'JE, no jump')
+                else:
+                    offset = self.fetch(1, 1)
+                    offset = int.from_bytes(offset, signed=True)
+                    self.ip += offset + 2  # +2 for the opcode and offset byte
+                    self.log(f'JE {hex(offset)}')
+
             # CALL rel16/32 = E8
             case 0xE8:
                 offset = self.fetch(1, self.size)
@@ -436,24 +530,45 @@ class CPU:
                 self.ip += offset + 2  # +2 for the opcode and offset byte
                 self.log(f'JMP {hex(offset)}')
 
+            # JMP rel16 = E9
+            case 0xE9:
+                offset = self.fetch(1, 2)
+                offset = int.from_bytes(offset, signed=True, byteorder="little")
+                self.ip += offset + 3  # +2 for the opcode and offset byte
+                self.log(f'JMP {hex(offset)}')
+
             # INT imm8 = CD r
             case 0xCD:
                 code = self.fetch(1, 1)[0]  # fetch interrupt code
                 if code == 0x10:  # BIOS video interrupt
                     if self.get_reg(4,1) == 0x0E:  # Teletype output (AH = 0x0E)
+                        self.video_mode = 0x0E
                         char = self.get_reg(0, 1)
-                        self.memory.write(0xB8000 + ((self.cursor_y * 80 + self.cursor_x) * 2), char.to_bytes(1, 'little'))
-                        self.memory.write(0xB8000 + ((self.cursor_y * 80 + self.cursor_x) * 2) + 1, 0b00001111.to_bytes())
-                        self.cursor_x += 1
+                        if char == 0x0a:  # Newline charact
+                            self.cursor_y += 1
+                        elif char == 0x0d:  # Carriage return character
+                            self.cursor_x = 0
+                        else:
+                            self.memory.write(0xB8000 + ((self.cursor_y * 80 + self.cursor_x) * 2), char.to_bytes(1, 'little'))
+                            self.memory.write(0xB8000 + ((self.cursor_y * 80 + self.cursor_x) * 2) + 1, 0b00001111.to_bytes())
+                            self.cursor_x += 1
                         if self.cursor_x >= 80:  # Wrap around at 80 characters
                             self.cursor_x = 0
                             self.cursor_y += 1
+                        if self.cursor_y >= 25:  # Wrap around at 25 characters
+                            self.cursor_y = 0
                     elif self.get_reg(4, 1) == 0x02: # Set cursor possition
                         self.cursor_x = self.get_reg(2, 1) # dl
                         self.cursor_y = self.get_reg(6, 1) # dh
+                    elif self.get_reg(4, 1) == 0x00: # Set video mode
+                        mode = self.get_reg(0, 1) # AL
+                        match mode:
+                            case 0x13: # VGA Mode 13h (320x200x8bpp)
+                                self.video_mode = 0x13
                     else:
                         self.log(f"Unhandled BIOS interrupt for 0x10, AH={hex(self.get_reg(4,1))}")
                         self.halt()
+
                 elif code == 0x16:  # BIOS keyboard interrupt
                     if self.get_reg(4,1) == 0x00:  # Read keyboard input (AH = 0x00)
                         while len(self.screen.keystrokes) == 0 and not self.screen.exiting:
@@ -477,6 +592,12 @@ class CPU:
                 self.log("CLI")
                 self.ip += 1
 
+            # STI = FB
+            case 0xfb:
+                self.set_flag(9, 1)  # set the interrupt flag (IF)
+                self.log("STI")
+                self.ip += 1
+
             # XOR r/m8, r8 = 30 /r
             case 0x30:
                 modrm = modRM(self)
@@ -489,6 +610,12 @@ class CPU:
                     self.set_reg(modrm.rm, result, 1)
                 else:
                     self.memory.write(modrm.addr, result.to_bytes())
+                src = result
+                self.set_flag(2, bin(src).count('1') % 2 == 0)
+                self.set_flag(6, src == 0)
+                self.set_flag(7, src < 0)  # Negative flag
+                self.set_flag(11, 0)  # Overflow Flag (OF): cleared
+                self.set_flag(0, 0)  # Carry Flag (CF): cleared
                 self.log(f"XOR r/m8, {self.reg_name(modrm.reg, 1)}")
                 self.ip += 1
 
@@ -504,6 +631,12 @@ class CPU:
                     self.set_reg(modrm.rm, result, 2)
                 else:
                     self.memory.write(modrm.addr, result.to_bytes(2, byteorder="little", signed=True))
+                src = result
+                self.set_flag(2, bin(src).count('1') % 2 == 0)
+                self.set_flag(6, src == 0)
+                self.set_flag(7, src < 0)  # Negative flag
+                self.set_flag(11, 0)  # Overflow Flag (OF): cleared
+                self.set_flag(0, 0)  # Carry Flag (CF): cleared
                 self.log(f"XOR r/m16, {self.reg_name(modrm.reg, 2)}")
                 self.ip += 1
 
@@ -528,6 +661,13 @@ class CPU:
                     result = src ^ dest
                     self.set_reg(destreg, result, self.size)
                     self.log(f'XOR {self.reg_name(destreg, self.size)}, {hex(addr)}')
+                src = result
+                self.set_flag(2, bin(src).count('1') % 2 == 0)
+                self.set_flag(6, src == 0)
+                self.set_flag(7, src < 0)  # Negative flag
+                self.set_flag(11, 0)  # Overflow Flag (OF): cleared
+                self.set_flag(0, 0)  # Carry Flag (CF): cleared
+
             case _:
                 self.log(f'unknown opcode: {hex(opcode)}')
                 self.ip += 1
@@ -560,6 +700,9 @@ class CPU:
         return ["es", "cs", "ss", "ds", "fs", "gs"][idx]
 
     def set_sreg(self, idx: int, value: int) -> None:
+        if value < 0:
+            value = 0xFFFF + value + 1  # Convert negative to unsigned
+            self.halt("sreg negative")
         if idx == 0: self.es = value & 0xFFFF
         elif idx == 1: self.cs = value & 0xFFFF
         elif idx == 2: self.ss = value & 0xFFFF

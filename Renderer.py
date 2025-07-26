@@ -3,70 +3,83 @@
 # but be too lazy to make a program to render some text
 # I know this is probably not how the display buffer
 # works, but it works well enough for now
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from numpy import ndarray
 
+# Screen and character dimensions
 cols, rows = 80, 25
 cell_width, cell_height = 9, 16
 width, height = cols * cell_width, rows * cell_height
 
+# Load a bitmap font
+# You can also use `.ttf` if it’s pixel aligned (like CGA)
 font = ImageFont.truetype("cga.ttf", 14)
-
-image = Image.new("RGB", (width, height))
-draw = ImageDraw.Draw(image)
-
-last_buffer: bytearray = None
-last_rendered: ndarray = None
 
 # VGA 16-color palette (RGB)
 VGA_PALETTE = [
-    (0, 0, 0),          # 0: Black
-    (0, 0, 170),        # 1: Blue
-    (0, 170, 0),        # 2: Green
-    (0, 170, 170),      # 3: Cyan
-    (170, 0, 0),        # 4: Red
-    (170, 0, 170),      # 5: Magenta
-    (170, 85, 0),       # 6: Brown / Yellow
-    (170, 170, 170),    # 7: Light Gray
-    (85, 85, 85),       # 8: Dark Gray
-    (85, 85, 255),      # 9: Bright Blue
-    (85, 255, 85),      # 10: Bright Green
-    (85, 255, 255),     # 11: Bright Cyan
-    (255, 85, 85),      # 12: Bright Red
-    (255, 85, 255),     # 13: Bright Magenta
-    (255, 255, 85),     # 14: Yellow
-    (255, 255, 255),    # 15: White
+    (0, 0, 0), (0, 0, 170), (0, 170, 0), (0, 170, 170),
+    (170, 0, 0), (170, 0, 170), (170, 85, 0), (170, 170, 170),
+    (85, 85, 85), (85, 85, 255), (85, 255, 85), (85, 255, 255),
+    (255, 85, 85), (255, 85, 255), (255, 255, 85), (255, 255, 255),
 ]
 
-def render_text_buffer_to_rgb(buffer: bytearray) -> np.ndarray:
-    global last_buffer
-    global last_rendered
-    if last_buffer == buffer:
+VGA_PALETTE_np = np.array(VGA_PALETTE, dtype=np.uint8)
+
+# Cache rendered characters for reuse: (char, fg, bg) => Image
+glyph_cache = {}
+
+last_buffer = None
+last_rendered = None
+
+def h13_renderer(buffer):
+    # Convert buffer to palette indices
+    indices = np.frombuffer(b''.join(buffer), dtype=np.uint8)
+
+    if indices.size != 320 * 200:
+        raise ValueError(f"Expected 64000 bytes, got {indices.size}")
+
+    # Map palette indices to RGB
+    rgb_flat = VGA_PALETTE_np[indices]  # shape: (64000, 3)
+
+    # Reshape to (height=200, width=320)
+    rgb_image = rgb_flat.reshape((200, 320, 3))
+    rgb_image = np.transpose(rgb_image, (1, 0, 2))  # Transpose to (width, height, channels)
+    return rgb_image
+
+
+def text_renderer(buffer):
+    global last_buffer, last_rendered
+
+    if last_buffer == buffer and last_rendered is not None:
         return last_rendered
     last_buffer = buffer
-    # Create the image
+
+    image = Image.new("RGB", (width, height))
+
     for row in range(rows):
         for col in range(cols):
             i = (row * cols + col) * 2
             char_code = buffer[i][0]
             attr = buffer[i + 1][0]
+
             fg_color = VGA_PALETTE[attr & 0x0F]
             bg_color = VGA_PALETTE[(attr >> 4) & 0x0F]
-            try:
-                char = bytes([char_code]).decode('windows-1252')
-            except:
-                char = " "
 
-            x = col * cell_width
-            y = row * cell_height
+            char = bytes([char_code]).decode('cp437')
 
-            # Draw background
-            draw.rectangle((x, y, x + cell_width, y + cell_height), fill=bg_color)
+            cache_key = (char, fg_color, bg_color)
+            if cache_key not in glyph_cache:
+                # Render character with background to an image
+                glyph = Image.new("RGB", (cell_width, cell_height), color=bg_color)
+                d = ImageDraw.Draw(glyph)
+                d.text((0, 0), char, font=font, fill=fg_color)
+                glyph_cache[cache_key] = glyph
+            else:
+                glyph = glyph_cache[cache_key]
 
-            # Draw character
-            draw.text((x, y), char, font=font, fill=fg_color)
+            image.paste(glyph, (col * cell_width, row * cell_height))
 
-    # Convert to NumPy array
+    last_rendered = np.array(image)
     last_rendered = np.transpose(image, (1, 0, 2))
     return last_rendered

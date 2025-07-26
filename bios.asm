@@ -27,10 +27,13 @@ main:
     mov dh, 0x00            ; cursor y
     int 0x10                ; screen interrupt
 
+
+    mov es, ax              ; set esi to 0
     mov ax, 0x07C0
+    ; mov ax, 0x0010
     mov ds, ax              ; set data to bootsector address
 
-    jmp 0x0010:0x0000       ; jump to com
+    ; jmp 0x0010:0x0000       ; jump to com
     jmp 0x07C0:0x0000       ; jump to bootsector
     jmp 0x07C0:0x0144       ; jump to dos error screen
 
