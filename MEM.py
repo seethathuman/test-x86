@@ -1,45 +1,45 @@
 class Byte:
     def __init__(self, idx: int, mapped_object):
-        self.idx = idx
+        self.idx: int = idx
         self.obj = mapped_object
 
-        if not isinstance(self.idx, int): raise TypeError("index must be integer")
+    def value(self) -> int:
+        return self.obj[self.idx]
 
-    def value(self) -> bytes:
-        return self.obj[self.idx].to_bytes()
-
-    def set(self, value: bytes):
-        if not isinstance(value, bytes): raise TypeError("mapped byte must be set to byte")
+    def set(self, value: int) -> None:
         self.obj[self.idx] = value
+
+
+class Dummy:
+    def __init__(self, message: str):
+        self.message: str = message
+
+    def value(self) -> None:
+        raise KeyError(f"Attempt to read uninitialized memory {self.message}")
+
+    def set(self, address=0) -> None:
+        raise KeyError(f"Attempt to write to uninitialized memory {self.message}")
+
 
 class AddressSpace:
     def __init__(self):
-        self.content: list[bytes | Byte] = []
+        self.content: list[Byte | Dummy] = []
 
     def map(self, address: int, obj) -> None:
         if len(self.content) < len(obj) + address:
-            self.content.extend([b"\x00"] * ((len(obj) + address) - len(self.content)))
+            self.content.extend([Dummy(f"from {hex(len(self.content))} to {hex(address)}")] * (
+                    (len(obj) + address) - len(self.content)))
             print(f"[ADDRESSSPACE] map object of length {len(self.content)}")
         for i in range(len(obj)):
             self.content[i + address] = Byte(i, obj)
 
-    def read(self, offset: int, length: int) -> bytearray:
-        content = bytearray()
-        for offset in range(offset, offset+length):
-            byte = self.content[offset]
-            if isinstance(byte, Byte): byte = byte.value()
-            content += byte
-        return content
+    def read(self, offset: int, length: int) -> bytes:
+        return bytes([byte.value() for byte in self.content[offset:offset + length]])
 
     def write(self, offset: int, data: bytearray | bytes) -> None:
-        if isinstance(data, bytes):
-            data: bytearray = bytearray(data)
-        if len(self.content) < len(data) + offset:
-            self.content.extend([b"\x00"] * ((len(data) + offset) - len(self.content)))
-        for i in range(len(data)):
-            byte = self.content[i + offset]
-            if isinstance(byte, Byte): byte.set(data[i].to_bytes())
-            else: self.content[i + offset] = data[i].to_bytes()
+        for i, b in enumerate(data):
+            self.content[offset + i].set(b)
 
     def __getitem__(self, item):
+        print("[ADDRESSSPACE] WARNING: direct read to memory, please use read() instead.")
         return self.content[item]

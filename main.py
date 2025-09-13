@@ -4,6 +4,7 @@ def log(msg, src="Main"):
             src = f"[{src}]"
         print(f"{src} {msg}")
 
+
 def screen_thread():
     global address
     global screen
@@ -22,6 +23,8 @@ def screen_thread():
             screen.exit()
             break
 
+
+from time import perf_counter
 from time import sleep
 from CPU import CPU
 from DISK import Disk
@@ -29,23 +32,31 @@ from SCREEN import Screen
 from MEM import AddressSpace
 from threading import Thread
 
-debug = not True
+debug = not False
 cpu = CPU(debug_mode=debug)
 address = AddressSpace()
 
-# floppy = Disk("dos.img")
-floppy = Disk("screen_test.img")
-bios = Disk("bios.bin").content
+# 18-20k, pypy
 
-com = Disk("tests.com")
+floppy = Disk("images/dos_2.img")
 
+bios = Disk("images/bios.bin").content
+ram_real = [0x00] * 0x9FFFF
+video_ram = [0x00] * (0xBFFFF - 0xA0000)
 bootsector = floppy[0:512]
 
-address.write(0x0000, bytearray([0x00] * 0xFFFFF)) # 16-bit addressable space
-address.write(0x7c00, bootsector) # bootloader placed at 7c00
-address.write(0xF0000, bios)
-address.write(0xFFFF0, bytes(b'\xEA\x00\x00\x00\xF0')) # jump to F0000 placed at reset vector
+address.map(0, ram_real)  # 0x0-0x9FFFF
+address.map(0xA0000, video_ram)  # 0xA0000-0xBFFFF
 
+address.write(0x7c00, bootsector)  # bootloader placed at 0x7c00
+address.map(0xF0000, bios)
+address.map(0xFFFF0, bytes(b'\xEA\x00\x00\x00\xF0'))  # jump to F0000 placed at reset vector
+
+cpu.disks.append(floppy)
+
+ips_goal = 330_000  # 0.33 MIPS, 8086 at ~0.330 MIPS
+ips_count = 0
+start_time = perf_counter()
 cpu.memory = address
 
 log("------------------------", "")
@@ -63,13 +74,21 @@ while not screen:
 
 while True:
     log(f"IP: {hex(cpu.resolve_address(cpu.cs, cpu.ip))}", "CPU")
-    log(f"Instruction: {hex(cpu.fetch(0)[0])}", "CPU")
     cpu.execute()
     log("------------------------", "")
 
+    ips_count += 1
+    time = perf_counter()
+    if time - start_time > 3 and not debug:
+        speed = round(ips_count / (time - start_time))
+        print(
+            f"executed:{ips_count}, ips:{speed}, {round((speed / ips_goal) * 100)}% of goal {ips_goal}, ecx={cpu.ecx}")
+        start_time = time
+        ips_count = 0
+
     mode = cpu.video_mode
-    if screen.exiting: # display has crashed/exited
-        log("Display thread has exited, exiting.", "Main")
+    if screen.exiting:  # display has crashed/exited
+        log("Display thread has exited, exiting.")
         if error:
             raise error
         exit()

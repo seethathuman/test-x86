@@ -1,21 +1,20 @@
 class Disk:
     def __init__(self, file):
         with open(file, 'br') as f:
-            self.content = bytearray(f.read())
-        self.length = len(self.content)
+            self.content: bytearray = bytearray(f.read())
+        self.length: int = len(self.content)
 
-    def read(self, start, count):
-        return self.content[start % self.length:count+start % self.length]
+    def read(self, start:int, count:int):
+        return self.content[start % self.length:count + start % self.length]
 
-    def write(self, start, data):
-        self.content[start:start+len(data)] = data
+    def write(self, start:int, data:bytearray) -> None:
+        self.content[start:start + len(data)] = data
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, item):
+    def __getitem__(self, item) -> bytearray:
         return self.content[item]
 
-    def __setitem__(self, key, value):
-        if isinstance(value, bytes): value = value[0]
+    def __setitem__(self, key, value) -> None:
         self.content[key] = value

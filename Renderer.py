@@ -12,9 +12,7 @@ cols, rows = 80, 25
 cell_width, cell_height = 9, 16
 width, height = cols * cell_width, rows * cell_height
 
-# Load a bitmap font
-# You can also use `.ttf` if it’s pixel aligned (like CGA)
-font = ImageFont.truetype("cga.ttf", 14)
+font = ImageFont.truetype("resources/cga.ttf", 14)
 
 # VGA 16-color palette (RGB)
 VGA_PALETTE = [
@@ -32,9 +30,10 @@ glyph_cache = {}
 last_buffer = None
 last_rendered = None
 
-def h13_renderer(buffer):
+
+def h13_renderer(buffer: bytearray):
     # Convert buffer to palette indices
-    indices = np.frombuffer(b''.join(buffer), dtype=np.uint8)
+    indices = np.frombuffer(buffer, dtype=np.uint8)
 
     if indices.size != 320 * 200:
         raise ValueError(f"Expected 64000 bytes, got {indices.size}")
@@ -60,8 +59,8 @@ def text_renderer(buffer):
     for row in range(rows):
         for col in range(cols):
             i = (row * cols + col) * 2
-            char_code = buffer[i][0]
-            attr = buffer[i + 1][0]
+            char_code = buffer[i]
+            attr = buffer[i + 1]
 
             fg_color = VGA_PALETTE[attr & 0x0F]
             bg_color = VGA_PALETTE[(attr >> 4) & 0x0F]
